@@ -1324,14 +1324,18 @@ if (typeof Object.getPrototypeOf !== "function")
 	};
 	
 	// Collision polys
-	function CollisionPoly_(pts_array_)
+	function CollisionPoly_(pts_array_, enabled)
 	{
+		if (!pts_array_)
+			pts_array_ = [0, 0, 1, 0, 1, 1, 0, 1];
+		
 		this.pts_cache = [];
 		this.bboxLeft = 0;
 		this.bboxTop = 0;
 		this.bboxRight = 0;
 		this.bboxBottom = 0;
 		this.convexpolys = null;		// for physics behavior to cache separated polys
+		this.enabled = typeof enabled === "undefined" ? true : enabled;
 		this.set_pts(pts_array_);
 		cr.seal(this);
 	};
@@ -1620,6 +1624,11 @@ if (typeof Object.getPrototypeOf !== "function")
 			this.pts_cache[i21] = temp;
 		}
 	};
+	
+	CollisionPoly_.prototype.is_enabled = function()
+	{
+		return this.enabled;
+	}
 	
 	cr.CollisionPoly = CollisionPoly_;
 	
@@ -5087,6 +5096,53 @@ quat4.str=function(a){return"["+a[0]+", "+a[1]+", "+a[2]+", "+a[3]+"]"};
 			// (Note in debug mode window["nwgui"] is not available)
 			if (window["nwgui"] && window["nwgui"]["App"]["clearCache"])
 				window["nwgui"]["App"]["clearCache"]();
+		}
+
+		if (this.isCordova && this.isiOS)
+		{
+			function IsInContentEditable(el)
+			{
+				do {
+					// Don't check hasAttribute on the root document node (the method does not exist)
+					if (el.parentNode && el.hasAttribute("contenteditable"))
+						return true;
+
+					el = el.parentNode;
+				}
+				while (el);
+
+				return false;
+			}
+			
+			function KeyboardIsVisible()
+			{
+				var elem = document.activeElement;
+
+				if (!elem)
+					return false;
+
+				var tagName = elem.tagName.toLowerCase();
+				var inputTypes = ["email", "number", "password", "search", "tel", "text", "url"];
+
+				if (tagName === "textarea")
+					return true;
+				
+				if (tagName === "input")
+					return inputTypes.indexOf(elem.type.toLowerCase() || "text") > -1;
+
+				return IsInContentEditable(elem);
+			}
+			
+			/*
+				HACK work around specific issue on notched iOS devices
+				where opening the keyboard causing the view to scroll
+				above the top of the screen, but the scroll position
+				doesn't revert once the keyboard closes
+			*/
+			window.addEventListener("focusout", () => {
+				if (!KeyboardIsVisible())
+					document.scrollingElement.scrollTop = 0;
+			});
 		}
 		
 		// Save the project data URL if one is provided. (Used in preview mode.)
@@ -10135,6 +10191,82 @@ quat4.str=function(a){return"["+a[0]+", "+a[1]+", "+a[2]+", "+a[3]+"]"};
 		return null;
 	};
 	
+
+	function GetPermissionAPI()
+	{
+		var api = window["cordova"] && window["cordova"]["plugins"] && window["cordova"]["plugins"]["permissions"];
+
+		if (typeof api !== "object")
+		{
+			Promise.reject("Permission API is not loaded");
+		}
+
+		return Promise.resolve(api);
+	}
+
+	function RequestPermission(id)
+	{
+		return GetPermissionAPI()
+		.then(function (api)
+		{
+			return new Promise(function (resolve, reject)
+			{
+				api["requestPermission"](api[id], function (status) {
+					resolve(status["hasPermission"]);
+				}, reject);
+			});
+		});
+	}
+
+	function HasPermission(id)
+	{
+		return GetPermissionAPI()
+		.then(function (api)
+		{
+			return new Promise(function (resolve, reject)
+			{
+				api["checkPermission"](api[id], function (status) {
+					resolve(status["hasPermission"]);
+				}, reject);
+			});
+		});
+	}
+
+	Runtime.prototype.requirePermissions = function RequirePermissions(permissions)
+	{
+		return this.getPermissions(permissions)
+		.then(function (result)
+		{
+			if (result === false)
+				return Promise.reject("Permission not granted");
+		})
+	}
+
+	Runtime.prototype.getPermissions = function GetPermissions(permissions)
+	{
+		// only required with android ( cordova )
+		if ( !this.isCordova || !this.isAndroid)
+			return Promise.resolve(true);
+
+		return permissions.reduce(function (previous, id)
+		{	
+			return previous.then(function (previousResult) {
+				if (previousResult === false)
+					return false;
+
+				return HasPermission(id)
+				.then(function (status)
+				{
+					if (status)
+						return true;
+					else
+						return RequestPermission(id);
+				});
+			})
+		}, Promise.resolve(true))
+	}
+	
+
 	Runtime.prototype.doCanvasSnapshot = function (format_, quality_)
 	{
 		this.snapshotCanvas = [format_, quality_];
@@ -10263,6 +10395,7 @@ quat4.str=function(a){return"["+a[0]+", "+a[1]+", "+a[2]+", "+a[3]+"]"};
 					self.lastSaveJson = savingJson;
 					self.trigger(cr.system_object.prototype.cnds.OnSaveComplete, null);
 					self.lastSaveJson = "";
+					savingJson = "";
 					
 					if (continuous)
 						doContinuousPreviewReload();
@@ -10279,6 +10412,7 @@ quat4.str=function(a){return"["+a[0]+", "+a[1]+", "+a[2]+", "+a[3]+"]"};
 						self.lastSaveJson = savingJson;
 						self.trigger(cr.system_object.prototype.cnds.OnSaveComplete, null);
 						self.lastSaveJson = "";
+						savingJson = "";
 						
 						if (continuous)
 							doContinuousPreviewReload();
@@ -10302,6 +10436,7 @@ quat4.str=function(a){return"["+a[0]+", "+a[1]+", "+a[2]+", "+a[3]+"]"};
 					self.lastSaveJson = savingJson;
 					this.trigger(cr.system_object.prototype.cnds.OnSaveComplete, null);
 					self.lastSaveJson = "";
+					savingJson = "";
 					
 					if (continuous)
 						doContinuousPreviewReload();
@@ -14857,7 +14992,7 @@ window["cr_setSuspended"] = function(s)
 		}
 	};
 	
-	
+	/*c2h=562f4185-b90a-4537-b491-ac74a1717432*/
 	
 	EventBlock.prototype.postInit = function (hasElse/*, prevBlock_*/)
 	{
@@ -27596,14 +27731,14 @@ cr.plugins_.Audio = function(runtime)
 			
 			this.audioData = null;
 			
-			window["OpusDecoder"](buffer, function (err, rawAudio)
+			window["OpusDecoder"](buffer, function (err, decodedBytes)
 			{
 				if (err)
 				{
 					self.onDecodeError(err);
 					return;
 				}
-				
+				var rawAudio = new Float32Array(decodedBytes);
 				var audioBuffer = context["createBuffer"](1, rawAudio.length, 48000);
 				var channelBuffer = audioBuffer["getChannelData"](0);
 				channelBuffer.set(rawAudio);
@@ -30674,7 +30809,7 @@ cr.plugins_.Particles = function(runtime)
 	typeProto.createParticleTexture = function ()
 	{
 		// Shortcut to correctly render spritesheeted particle in WebGL: cut the image out of its spritesheet
-		// and create a texture from that. TODO: render directly from spritesheet texture via texture coords.
+		// and create a texture from that.
 		var tmpcanvas = document.createElement("canvas");
 		var w = this.spriteWidth;
 		var h = this.spriteHeight;
